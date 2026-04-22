@@ -24,6 +24,7 @@ import torch
 import cv2
 import matplotlib.cm as cm
 from tqdm.auto import tqdm
+from scipy.spatial.transform import Rotation
 
 import viser
 import viser.transforms as tf
@@ -31,6 +32,7 @@ import viser.transforms as tf
 from lingbot_map.utils.geometry import closed_form_inverse_se3, unproject_depth_map_to_point_map
 from lingbot_map.vis.utils import CameraState
 from lingbot_map.vis.sky_segmentation import apply_sky_segmentation
+from lingbot_map.vis.head_mask_apply import apply_head_mask
 
 
 class PointCloudViewer:
@@ -91,6 +93,8 @@ class PointCloudViewer:
         image_folder: Optional[str] = None,
         sky_mask_dir: Optional[str] = None,
         sky_mask_visualization_dir: Optional[str] = None,
+        mask_head: bool = False,
+        mask_head_dir: Optional[str] = None,
         depth_stride: int = 1,
     ):
         self.model = model
@@ -110,6 +114,8 @@ class PointCloudViewer:
                 pred_dict, use_point_map, mask_sky, image_folder,
                 sky_mask_dir=sky_mask_dir,
                 sky_mask_visualization_dir=sky_mask_visualization_dir,
+                mask_head=mask_head,
+                mask_head_dir=mask_head_dir,
                 depth_stride=depth_stride,
             )
         else:
@@ -139,6 +145,8 @@ class PointCloudViewer:
         image_folder: Optional[str],
         sky_mask_dir: Optional[str] = None,
         sky_mask_visualization_dir: Optional[str] = None,
+        mask_head: bool = False,
+        mask_head_dir: Optional[str] = None,
         depth_stride: int = 1,
     ) -> Tuple[List, List, List, Dict]:
         """Process prediction dictionary to extract visualization data.
@@ -150,6 +158,8 @@ class PointCloudViewer:
             image_folder: Path to images for sky segmentation.
             sky_mask_dir: Directory for cached sky masks.
             sky_mask_visualization_dir: Directory for sky mask visualization images.
+            mask_head: Apply head/rig masks (demo generates <input>_head_masks and passes the path).
+            mask_head_dir: Internal absolute path to per-frame masks (same basenames as images).
             depth_stride: Only project depth to point cloud every N frames.
                 Frames not projected will have empty point clouds but still
                 show camera frustums and images. 1 = every frame (default).
@@ -176,6 +186,21 @@ class PointCloudViewer:
                 conf, image_folder=image_folder, images=images,
                 sky_mask_dir=sky_mask_dir,
                 sky_mask_visualization_dir=sky_mask_visualization_dir,
+            )
+
+        if mask_head and mask_head_dir:
+            image_paths = pred_dict.get("image_paths")
+            # See demo.py: masks on disk are full-frame; crop boxes align them to conf (cropped) geometry.
+            _hc = pred_dict.get("head_center_crops")
+            if _hc is None:
+                _hc = pred_dict.get("head_square_crops")
+            conf = apply_head_mask(
+                conf,
+                image_paths=image_paths,
+                image_folder=image_folder,
+                mask_head_dir=mask_head_dir,
+                num_frames=conf.shape[0],
+                input_center_crops=_hc,
             )
 
         # Convert images from (S, 3, H, W) to (S, H, W, 3)
@@ -687,6 +712,10 @@ class PointCloudViewer:
             np.full((len(colors_u8), 1), int(alpha * 255), dtype=np.uint8),
         ], axis=1)  # (N, 4)
 
+        # Keep the full point cloud before any export-only subsampling.
+        full_vertices = vertices
+        full_colors_rgba = colors_rgba
+
         # Compute scene scale for camera sizing
         lo = np.percentile(vertices, 5, axis=0)
         hi = np.percentile(vertices, 95, axis=0)
@@ -773,25 +802,179 @@ class PointCloudViewer:
                     scene_3d.add_geometry(traj_mesh)
 
         # Align scene using first camera extrinsic
+        scene_transform = np.eye(4)
         if self.cam_dict is not None and len(self.all_steps) > 0:
-            from lingbot_map.vis.glb_export import apply_scene_alignment
-            step0 = self.all_steps[0]
-            R0 = self.cam_dict["R"][step0] if "R" in self.cam_dict else np.eye(3)
-            t0 = self.cam_dict["t"][step0] if "t" in self.cam_dict else np.zeros(3)
-            c2w_0 = np.eye(4)
-            c2w_0[:3, :3] = R0
-            c2w_0[:3, 3] = t0
-            w2c_0 = np.linalg.inv(c2w_0)
-            extrinsics = np.expand_dims(w2c_0, 0)
-            scene_3d = apply_scene_alignment(scene_3d, extrinsics)
+            scene_transform = self._compute_scene_alignment_matrix()
+            scene_3d.apply_transform(scene_transform)
 
         output_path = self.glb_output_path.value
         scene_3d.export(output_path)
 
+        self._export_point_cloud_variants(
+            output_path=output_path,
+            vertices=full_vertices,
+            colors_rgba=full_colors_rgba,
+            transform=scene_transform,
+        )
+
         n_pts = len(vertices)
         mode_str = f"spheres r={self.glb_sphere_radius_slider.value}" if export_mode == "Spheres" else "points"
-        self.glb_status.value = f"Saved: {output_path} ({n_pts:,} {mode_str})"
+        self.glb_status.value = f"Saved: {output_path} + PLY variants ({n_pts:,} {mode_str})"
         print(f"GLB exported to {output_path} ({n_pts:,} {mode_str})")
+
+    def _compute_scene_alignment_matrix(self) -> np.ndarray:
+        """Return the same alignment transform used for GLB export."""
+        if self.cam_dict is None or len(self.all_steps) == 0:
+            return np.eye(4)
+
+        from lingbot_map.vis.glb_export import get_opengl_conversion_matrix
+
+        step0 = self.all_steps[0]
+        R0 = self.cam_dict["R"][step0] if "R" in self.cam_dict else np.eye(3)
+        t0 = self.cam_dict["t"][step0] if "t" in self.cam_dict else np.zeros(3)
+
+        c2w_0 = np.eye(4)
+        c2w_0[:3, :3] = R0
+        c2w_0[:3, 3] = t0
+
+        align_rotation = np.eye(4)
+        align_rotation[:3, :3] = Rotation.from_euler("y", 180, degrees=True).as_matrix()
+        return c2w_0 @ get_opengl_conversion_matrix() @ align_rotation
+
+    @staticmethod
+    def _sample_point_indices(num_points: int, max_points: Optional[int]) -> Optional[np.ndarray]:
+        """Return evenly spaced indices capped at max_points, or None for all points."""
+        if max_points is None or max_points <= 0 or num_points <= max_points:
+            return None
+        return np.linspace(0, num_points - 1, num=max_points, dtype=np.int64)
+
+    @staticmethod
+    def _write_point_cloud_ply(
+        output_path: str,
+        vertices: np.ndarray,
+        colors_rgba: np.ndarray,
+    ) -> int:
+        """Write a binary little-endian PLY from a full in-memory point cloud."""
+        vertices = np.asarray(vertices)
+        colors_rgba = np.asarray(colors_rgba)
+
+        if vertices.ndim != 2 or vertices.shape[1] != 3:
+            raise ValueError(f"vertices must have shape (N, 3), got {vertices.shape}")
+        if colors_rgba.ndim != 2 or colors_rgba.shape[0] != vertices.shape[0]:
+            raise ValueError(
+                f"colors must have shape (N, C) matching vertices, got {colors_rgba.shape}"
+            )
+        num_points = len(vertices)
+
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+        header = "\n".join([
+            "ply",
+            "format binary_little_endian 1.0",
+            f"element vertex {num_points}",
+            "property float x",
+            "property float y",
+            "property float z",
+            "property uchar red",
+            "property uchar green",
+            "property uchar blue",
+            "property uchar alpha",
+            "end_header",
+            "",
+        ])
+
+        vertex_dtype = np.dtype([
+            ("x", "<f4"),
+            ("y", "<f4"),
+            ("z", "<f4"),
+            ("red", "u1"),
+            ("green", "u1"),
+            ("blue", "u1"),
+            ("alpha", "u1"),
+        ])
+
+        pts = np.asarray(vertices, dtype=np.float32)
+        cols = np.asarray(colors_rgba)
+        if cols.dtype != np.uint8:
+            cols = np.asarray(cols, dtype=np.float32)
+            if cols.size > 0 and float(np.max(cols)) <= 1.0 + 1e-6:
+                cols = (np.clip(cols, 0.0, 1.0) * 255.0).astype(np.uint8)
+            else:
+                cols = np.clip(cols, 0.0, 255.0).astype(np.uint8)
+
+        if cols.shape[1] == 3:
+            alpha = np.full((len(cols), 1), 255, dtype=np.uint8)
+            cols = np.concatenate([cols, alpha], axis=1)
+        elif cols.shape[1] != 4:
+            raise ValueError(f"colors must have 3 or 4 channels, got {cols.shape}")
+
+        data = np.empty(num_points, dtype=vertex_dtype)
+        data["x"] = pts[:, 0]
+        data["y"] = pts[:, 1]
+        data["z"] = pts[:, 2]
+        data["red"] = cols[:, 0]
+        data["green"] = cols[:, 1]
+        data["blue"] = cols[:, 2]
+        data["alpha"] = cols[:, 3]
+
+        with open(output_path, "wb") as f:
+            f.write(header.encode("ascii"))
+            f.write(data.tobytes())
+
+        return num_points
+
+    def _export_point_cloud_variants(
+        self,
+        output_path: str,
+        vertices: np.ndarray,
+        colors_rgba: np.ndarray,
+        transform: Optional[np.ndarray] = None,
+    ) -> None:
+        """Export _s, _m, and _full PLY point clouds next to the GLB."""
+        base, _ = os.path.splitext(output_path)
+        if not base:
+            base = output_path
+
+        full_vertices = (
+            self._apply_transform_to_points(vertices, transform)
+            if transform is not None else np.asarray(vertices, dtype=np.float32)
+        )
+
+        export_specs = [
+            ("full", None),
+            ("s", 600_000),
+            ("m", 2_400_000),
+        ]
+
+        for suffix, limit in export_specs:
+            ply_path = f"{base}_{suffix}.ply"
+            self.glb_status.value = f"Saving {os.path.basename(ply_path)}..."
+            if limit is None:
+                ply_vertices = full_vertices
+                ply_colors = colors_rgba
+            else:
+                indices = self._sample_point_indices(len(full_vertices), limit)
+                if indices is None:
+                    ply_vertices = full_vertices
+                    ply_colors = colors_rgba
+                else:
+                    ply_vertices = full_vertices[indices]
+                    ply_colors = colors_rgba[indices]
+
+            n_pts = self._write_point_cloud_ply(
+                ply_path,
+                vertices=ply_vertices,
+                colors_rgba=ply_colors,
+            )
+            print(f"PLY exported to {ply_path} ({n_pts:,} points)")
+
+    @staticmethod
+    def _apply_transform_to_points(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
+        """Apply a 4x4 transform to an (N, 3) point array."""
+        points = np.asarray(points, dtype=np.float32)
+        rotation = np.asarray(transform[:3, :3], dtype=np.float32)
+        translation = np.asarray(transform[:3, 3], dtype=np.float32)
+        return points @ rotation.T + translation
 
     @staticmethod
     def _build_trajectory_tube(positions, radius, colormap, num_cameras):

@@ -29,19 +29,47 @@ except ImportError:
     FLASHINFER_AVAILABLE = False
     print("flashinfer not available")
 
-try:
-    from torchtitan.distributed.sequence_parallel import (
+_ULYSSES_OPS = None
+
+
+def _load_ulysses_ops():
+    """Load sequence-parallel helpers only when the CP path is exercised.
+
+    LingBot's standalone demo keeps ``enable_ulysses_cp=False`` by default, so
+    importing this module must not require torchtitan unless the user explicitly
+    turns on context parallelism.
+    """
+    global _ULYSSES_OPS
+    if _ULYSSES_OPS is not None:
+        return _ULYSSES_OPS
+
+    try:
+        from torchtitan.distributed.sequence_parallel import (
+            gather_seq_scatter_heads,
+            gather_heads_scatter_seq,
+            pad_tensor,
+            slice_input_tensor_scale_grad,
+            gather_outputs,
+        )
+    except Exception as exc:
+        raise ImportError(
+            "Ulysses context parallelism requires a torchtitan build that "
+            "provides torchtitan.distributed.sequence_parallel. Keep "
+            "enable_ulysses_cp=False or install a compatible build."
+        ) from exc
+
+    _ULYSSES_OPS = (
         gather_seq_scatter_heads,
         gather_heads_scatter_seq,
         pad_tensor,
         slice_input_tensor_scale_grad,
         gather_outputs,
     )
-except ImportError:
-    print("torchtitan not available for ulysses cp")
+    return _ULYSSES_OPS
 
 def gather_seq_scatter_heads_qkv(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seq_dim: int, head_dim: int):
     """Gather sequence dimension and scatter head dimension for Q, K, V tensors."""
+    gather_seq_scatter_heads, _, _, _, _ = _load_ulysses_ops()
     q = gather_seq_scatter_heads(q, seq_dim, head_dim)
     k = gather_seq_scatter_heads(k, seq_dim, head_dim)
     v = gather_seq_scatter_heads(v, seq_dim, head_dim)

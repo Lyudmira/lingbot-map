@@ -5,12 +5,36 @@
 # LICENSE file in the root directory of this source tree.
 
 from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, Optional, Tuple
 
 import torch
 from PIL import Image
 from torchvision import transforms as TF
 from tqdm.auto import tqdm
 import numpy as np
+
+# Largest axis-aligned crop with given aspect (rw:rh width:height), centered.
+CENTER_ASPECT_RATIOS: Dict[str, Tuple[int, int]] = {
+    "square": (1, 1),
+    "16_9": (16, 9),
+    "16_10": (16, 10),
+    "4_3": (4, 3),
+    "5_4": (5, 4),
+}
+
+
+def largest_centered_aspect_crop(
+    orig_w: int, orig_h: int, rw: int, rh: int
+) -> Tuple[int, int, int, int]:
+    """Return integer PIL box (left, top, crop_w, crop_h) for max inscribed centered crop."""
+    scale = min(orig_w / rw, orig_h / rh)
+    crop_w = int(scale * rw)
+    crop_h = int(scale * rh)
+    crop_w = max(1, min(crop_w, orig_w))
+    crop_h = max(1, min(crop_h, orig_h))
+    left = (orig_w - crop_w) // 2
+    top = (orig_h - crop_h) // 2
+    return left, top, crop_w, crop_h
 
 
 def load_and_preprocess_images_square(image_path_list, target_size=1024):
@@ -97,7 +121,17 @@ def load_and_preprocess_images_square(image_path_list, target_size=1024):
     return images, original_coords
 
 
-def load_and_preprocess_images(image_path_list, fx=None, fy=None, cx=None, cy=None, mode="crop", image_size=512, patch_size=16):
+def load_and_preprocess_images(
+    image_path_list,
+    fx=None,
+    fy=None,
+    cx=None,
+    cy=None,
+    mode="crop",
+    image_size=512,
+    patch_size=16,
+    center_aspect_crop: Optional[str] = None,
+):
     """
     A quick start function to load and preprocess images for model input.
     This assumes the images should have the same shape for easier batching, but our model can also work well with different shapes.
@@ -105,12 +139,20 @@ def load_and_preprocess_images(image_path_list, fx=None, fy=None, cx=None, cy=No
     Args:
         image_path_list (list): List of paths to image files
         mode (str, optional): Preprocessing mode, either "crop" or "pad".
-                             - "crop" (default): Sets width to 518px and center crops height if needed.
-                             - "pad": Preserves all pixels by making the largest dimension 518px
-                               and padding the smaller dimension to reach a square shape.
+                             - "crop" (default): Resizes width to ``image_size`` and center crops height if needed.
+                             - "pad": Preserves all pixels by resizing the larger dimension to ``image_size``
+                               and keeping the result rectangular. Images in a batch are then padded to the
+                               maximum height/width observed in the batch.
+        center_aspect_crop: If set, center-crop each image to the largest rectangle with that aspect
+            before the usual resize/pad pipeline. One of:
+            ``square`` (1:1), ``16_9``, ``16_10``, ``4_3``, ``5_4`` (see ``CENTER_ASPECT_RATIOS``).
+            Returns per-frame crop metadata for mask alignment.
 
     Returns:
-        torch.Tensor: Batched tensor of preprocessed images with shape (N, 3, H, W)
+        (torch.Tensor, optional[list]): ``(images, center_crop_boxes)`` where each entry is
+        ``(left, top, crop_w, crop_h, orig_w, orig_h)`` in original-image pixels, or the whole list is
+        ``None`` when ``center_aspect_crop`` is unset. If intrinsics ``fx``…``cy`` are provided,
+        returns ``(images, center_crop_boxes, fx, fy, cx, cy)``.
 
     Raises:
         ValueError: If the input list is empty or if mode is invalid
@@ -121,18 +163,20 @@ def load_and_preprocess_images(image_path_list, fx=None, fy=None, cx=None, cy=No
         - When mode="crop": The function ensures width=518px while maintaining aspect ratio
           and height is center-cropped if larger than 518px
         - When mode="pad": The function ensures the largest dimension is 518px while maintaining aspect ratio
-          and the smaller dimension is padded to reach a square shape (518x518)
+          and keeps the resized images rectangular (no forced square crop/pad)
         - Dimensions are adjusted to be divisible by 14 for compatibility with model requirements
     """
     # Check for empty list
     if len(image_path_list) == 0:
         raise ValueError("At least 1 image is required")
 
-        
-
     # Validate mode
     if mode not in ["crop", "pad"]:
         raise ValueError("Mode must be either 'crop' or 'pad'")
+    if center_aspect_crop is not None and center_aspect_crop not in CENTER_ASPECT_RATIOS:
+        raise ValueError(
+            f"center_aspect_crop must be one of {tuple(CENTER_ASPECT_RATIOS)}, got {center_aspect_crop!r}"
+        )
 
     target_size = image_size
     to_tensor = TF.ToTensor()
@@ -146,13 +190,25 @@ def load_and_preprocess_images(image_path_list, fx=None, fy=None, cx=None, cy=No
         img = img.convert("RGB")
 
         width, height = img.size
+        orig_w, orig_h = width, height
+        geom_crop = None
+        if center_aspect_crop:
+            rw, rh = CENTER_ASPECT_RATIOS[center_aspect_crop]
+            left, top, crop_w, crop_h = largest_centered_aspect_crop(orig_w, orig_h, rw, rh)
+            img = img.crop((left, top, left + crop_w, top + crop_h))
+            width, height = crop_w, crop_h
+            geom_crop = (left, top, crop_w, crop_h, orig_w, orig_h)
 
         fx_val = fy_val = cx_val = cy_val = None
         if fx is not None:
-            fx_val = fx[i] * width
-            fy_val = fy[i] * height
-            cx_val = cx[i] * width
-            cy_val = cy[i] * height
+            fx_val = fx[i] * orig_w
+            fy_val = fy[i] * orig_h
+            cx_val = cx[i] * orig_w
+            cy_val = cy[i] * orig_h
+            if center_aspect_crop and geom_crop is not None:
+                l0, t0, _, _, _, _ = geom_crop
+                cx_val = cx_val - l0
+                cy_val = cy_val - t0
 
         if mode == "pad":
             if width >= height:
@@ -178,27 +234,17 @@ def load_and_preprocess_images(image_path_list, fx=None, fy=None, cx=None, cy=No
             cx_val = img.shape[2] / 2
             cy_val = img.shape[1] / 2
 
-        if mode == "pad":
-            h_padding = target_size - img.shape[1]
-            w_padding = target_size - img.shape[2]
-            if h_padding > 0 or w_padding > 0:
-                pad_top = h_padding // 2
-                pad_bottom = h_padding - pad_top
-                pad_left = w_padding // 2
-                pad_right = w_padding - pad_left
-                img = torch.nn.functional.pad(
-                    img, (pad_left, pad_right, pad_top, pad_bottom), mode="constant", value=1.0
-                )
-
-        return i, img, (fx_val, fy_val, cx_val, cy_val)
+        return i, img, (fx_val, fy_val, cx_val, cy_val), geom_crop
 
     # Parallel load with progress bar
     num_workers = min(16, len(image_path_list))
     results = [None] * len(image_path_list)
+    center_crop_boxes: list = [None] * len(image_path_list)
     with ThreadPoolExecutor(max_workers=num_workers) as pool:
         futures = pool.map(_load_one, enumerate(image_path_list))
-        for i, img, calib in tqdm(futures, total=len(image_path_list), desc="Loading images"):
+        for i, img, calib, sqc in tqdm(futures, total=len(image_path_list), desc="Loading images"):
             results[i] = img
+            center_crop_boxes[i] = sqc
             if fx is not None:
                 fx[i], fy[i], cx[i], cy[i] = calib
 
@@ -238,6 +284,8 @@ def load_and_preprocess_images(image_path_list, fx=None, fy=None, cx=None, cy=No
         # Verify shape is (1, C, H, W)
         if images.dim() == 3:
             images = images.unsqueeze(0)
+    if center_aspect_crop is None:
+        center_crop_boxes = None
     if fx is not None:
-        return images, fx, fy, cx, cy
-    return images
+        return images, center_crop_boxes, fx, fy, cx, cy
+    return images, center_crop_boxes

@@ -218,18 +218,28 @@ class AggregatorBase(nn.Module, ABC):
             )
 
             # Load pretrained weights
+            if not pretrained_path:
+                raise FileNotFoundError(
+                    "Missing pretrained_path for dinov2 patch_embed. "
+                    "Pass --pretrained_path with a valid DINOv2 backbone checkpoint."
+                )
             try:
-                ckpt = torch.load(pretrained_path)
-                del ckpt['pos_embed']
+                ckpt = torch.load(pretrained_path, map_location="cpu", weights_only=False)
+                ckpt.pop("pos_embed", None)
                 logger.info("Loading pretrained weights for DINOv2")
                 missing, unexpected = self.patch_embed.load_state_dict(ckpt, strict=False)
-                logger.info(f"Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
+                missing = [k for k in missing if k != "pos_embed"]
+                if missing or unexpected:
+                    raise RuntimeError(
+                        "DINOv2 backbone checkpoint did not match patch_embed strictly: "
+                        f"missing={missing}, unexpected={unexpected}"
+                    )
+                logger.info("DINOv2 patch_embed weights loaded successfully with strict match")
 
                 # Store checkpoint for block initialization
                 self._dino_checkpoint = ckpt
             except Exception as e:
-                logger.warning(f"Failed to load pretrained weights: {e}")
-                self._dino_checkpoint = None
+                raise RuntimeError(f"Failed to load pretrained weights from {pretrained_path}: {e}") from e
 
             # Disable gradients for mask token
             if hasattr(self.patch_embed, "mask_token"):
