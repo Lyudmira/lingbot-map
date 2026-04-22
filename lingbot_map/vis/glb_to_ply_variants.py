@@ -1,8 +1,5 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
+# Fork-only: this file is not part of Meta Platforms, Inc.'s original lingbot-map
+# source distribution. Copyright (c) the contributors to this repository fork.
 
 """
 Convert an existing GLB scene into three colored PLY point clouds.

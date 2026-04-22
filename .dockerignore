@@ -1,0 +1,24 @@
+# VCS and local tooling
+.git
+.cursor
+.venv
+
+# Bytecode / build artifacts
+__pycache__
+*.py[cod]
+*.egg-info
+
+# Runtime data (mount at docker run)
+checkpoints
+input
+output
+output_old
+.cache
+
+# Large optional inputs (skyseg auto-downloads if missing when using --mask_sky)
+skyseg.onnx
+
+# Non-runtime assets
+lingbot-map_paper.pdf
+notes.md
+assets

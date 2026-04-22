@@ -1,4 +1,5 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
+# Fork-only: this file is not part of Meta Platforms, Inc.'s original lingbot-map
+# source distribution. Copyright (c) the contributors to this repository fork.
 """Load static head / rig masks and gate depth confidence (separate from sky ONNX path).
 
 When demo uses --crop_aspect, cached masks match uncropped source pixels; ``input_center_crops``

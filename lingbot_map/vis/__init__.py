@@ -38,6 +38,7 @@ from lingbot_map.vis.sky_segmentation import (
     segment_sky,
 )
 from lingbot_map.vis.glb_export import predictions_to_glb
+from lingbot_map.vis.colmap_export import export_colmap_sparse
 from lingbot_map.vis.glb_to_ply_variants import export_glb_to_ply_variants
 
 __all__ = [
@@ -47,6 +48,7 @@ __all__ = [
     "viser_wrapper",
     # GLB export
     "predictions_to_glb",
+    "export_colmap_sparse",
     "export_glb_to_ply_variants",
     # Utilities
     "CameraState",

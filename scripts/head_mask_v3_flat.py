@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Fork-only: this file is not part of Meta Platforms, Inc.'s original lingbot-map
+# source distribution. Copyright (c) the contributors to this repository fork.
 """
 CLI for flat-folder head / rig masks. Library implementation: lingbot_map.utils.head_mask_v3_flat.
 """

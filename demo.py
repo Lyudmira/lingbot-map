@@ -18,7 +18,15 @@ Usage:
     # Other aspects or no crop: --crop_aspect square|16_10|4_3|5_4|none
     python demo.py --image_folder /path/to/images/ --crop_aspect square --mask_head
     python demo.py --image_folder /path/to/images/ --square   # same as --crop_aspect square
+
+    # COLMAP text model (sparse/0: cameras, images, points3D); points = depth unprojection like GLB
+    python demo.py --image_folder /path/to/images/ --colmap
+    python demo.py --image_folder /path/to/images/ --colmap /path/to/out_colmap --no_export_glb
 """
+
+# Fork: substantial CLI/export/crop/COLMAP behavior here is contributed by this fork and is
+# not part of Meta Platforms, Inc.'s original distribution; upstream portions remain
+# attributable per repository history and third-party notices.
 
 import argparse
 import glob
@@ -26,10 +34,9 @@ import os
 import time
 from pathlib import Path
 
-_DEFAULT_MODEL_PATH = "/data/users/mia/current/lingbot-map/checkpoints/lingbot-map-long.pt"
-_DEFAULT_PRETRAINED_PATH = (
-    "/data/users/mia/current/lingbot-map/checkpoints/dinov2_vitl14_reg_official.pth"
-)
+_REPO_ROOT = Path(__file__).resolve().parent
+_DEFAULT_MODEL_PATH = str(_REPO_ROOT / "checkpoints" / "lingbot-map-long.pt")
+_DEFAULT_PRETRAINED_PATH = str(_REPO_ROOT / "checkpoints" / "dinov2_vitl14_reg_official.pth")
 _EXPORT_GLB_AUTO = "__AUTO__"
 
 # Must be set before `import torch` / any CUDA init. Reduces the reserved-vs-allocated
@@ -232,6 +239,16 @@ def _ensure_head_masks(
         )
     )
     return str(mask_dir)
+
+
+def _resolve_colmap_root(colmap_arg, resolved_media_folder: str) -> Path | None:
+    """COLMAP root directory (contains ``sparse/0``). ``None`` = disabled."""
+    if colmap_arg is None:
+        return None
+    if colmap_arg == "":
+        stem = Path(resolved_media_folder).name
+        return Path("output") / stem / "colmap"
+    return Path(colmap_arg).expanduser().resolve()
 
 
 def _resolve_export_glb_path(export_glb_flag, resolved_media_folder: str) -> str | None:
@@ -517,6 +534,16 @@ def main():
         default=False,
         help="Launch interactive viser after inference (default: off; GLB export returns before viewer).",
     )
+    parser.add_argument(
+        "--colmap",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="DIR",
+        help="Export COLMAP text model (cameras.txt, images.txt, points3D.txt) under DIR/sparse/0. "
+             "Dense points use the same depth-unprojection world frame as GLB (model units). "
+             "Omit DIR to use output/<input_folder_name>/colmap.",
+    )
 
     args = parser.parse_args()
     assert args.image_folder or args.video_path, \
@@ -681,29 +708,25 @@ def main():
 
     export_glb_flag = None if args.no_export_glb else args.export_glb
     export_glb_path = _resolve_export_glb_path(export_glb_flag, resolved_image_folder)
-    if export_glb_path:
+    colmap_root = _resolve_colmap_root(args.colmap, resolved_image_folder)
+    need_depth_export = bool(export_glb_path) or (colmap_root is not None)
+
+    pc_list = color_list = conf_list = cam_dict = None
+    export_viewer = None
+    if need_depth_export:
         try:
-            from types import SimpleNamespace
             from lingbot_map.vis import PointCloudViewer
 
-            export_path = export_glb_path
-            output_dir = os.path.dirname(export_path)
-            if output_dir:
-                os.makedirs(output_dir, exist_ok=True)
+            export_viewer = PointCloudViewer.__new__(PointCloudViewer)
+            export_viewer.vis_threshold = args.conf_threshold
+            export_viewer.show_camera = True
+            export_viewer.point_size = args.point_size
+            export_viewer.original_images = []
 
-            viewer = PointCloudViewer.__new__(PointCloudViewer)
-            viewer.vis_threshold = args.conf_threshold
-            viewer.show_camera = True
-            viewer.point_size = args.point_size
-            viewer.original_images = []
-
-            # Match the interactive viewer's default behavior: use depth-based
-            # unprojection for export. The point-map head is not always
-            # available in checkpoints, and falling back to world_points here
-            # can silently export a random/untrained branch.
+            # Depth-based unprojection (same as GLB); avoids untrained world_points head.
             use_point_map = False
             pc_list, color_list, conf_list, cam_dict = PointCloudViewer._process_pred_dict(
-                viewer,
+                export_viewer,
                 vis_predictions,
                 use_point_map=use_point_map,
                 mask_sky=args.mask_sky,
@@ -714,11 +737,43 @@ def main():
                 mask_head_dir=mask_head_dir_for_vis,
                 depth_stride=max(1, args.export_frame_stride),
             )
-            viewer.pcs, viewer.all_steps = PointCloudViewer.read_data(
-                viewer, pc_list, color_list, conf_list, edge_color_list=None
+            export_viewer.pcs, export_viewer.all_steps = PointCloudViewer.read_data(
+                export_viewer, pc_list, color_list, conf_list, edge_color_list=None
             )
-            viewer.cam_dict = cam_dict
+            export_viewer.cam_dict = cam_dict
+        except ImportError:
+            print("viser / viewer deps missing. Install with: pip install lingbot-map[vis]")
+            print(f"Predictions contain keys: {list(predictions.keys())}")
+            return
 
+    if colmap_root is not None:
+        try:
+            from lingbot_map.vis.colmap_export import export_colmap_sparse
+
+            sparse_dir = colmap_root / "sparse" / "0"
+            colmap_root.mkdir(parents=True, exist_ok=True)
+            export_colmap_sparse(
+                sparse_dir,
+                vis_predictions,
+                pc_list,
+                color_list,
+                conf_list,
+                conf_threshold=args.conf_threshold,
+                downsample_factor=args.downsample_factor,
+            )
+        except Exception as exc:
+            print(f"COLMAP export failed: {exc}")
+
+    if export_glb_path:
+        try:
+            from types import SimpleNamespace
+
+            export_path = export_glb_path
+            output_dir = os.path.dirname(export_path)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+
+            viewer = export_viewer
             viewer.glb_output_path = SimpleNamespace(value=export_path)
             viewer.glb_show_cam_checkbox = SimpleNamespace(value=True)
             viewer.glb_cam_scale_slider = SimpleNamespace(value=1.0)

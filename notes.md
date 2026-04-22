@@ -1,5 +1,7 @@
 # LingBot-MAP demo — operational notes
 
+> **Fork:** this note is maintained in this repository fork and is **not** part of Meta Platforms' original lingbot-map documentation.
+
 This file summarizes behaviors and flags that are easy to miss from `--help` alone (especially around memory, crops, masks, and export).
 
 ## Hardware (VRAM, RAM, swap)

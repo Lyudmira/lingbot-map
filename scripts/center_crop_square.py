@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Fork-only: this file is not part of Meta Platforms, Inc.'s original lingbot-map
+# source distribution. Copyright (c) the contributors to this repository fork.
 """Center-crop images in a directory to 1:1 (largest inscribed square)."""
 
 from __future__ import annotations

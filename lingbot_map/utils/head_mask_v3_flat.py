@@ -1,4 +1,5 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
+# Fork-only: this file is not part of Meta Platforms, Inc.'s original lingbot-map
+# source distribution. Copyright (c) the contributors to this repository fork.
 # V3-style temporal head / rig occluder mask for a flat image folder (library entry).
 
 from __future__ import annotations
