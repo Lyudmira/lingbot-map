@@ -60,6 +60,7 @@ WORKDIR /workspace/lingbot-map
 COPY pyproject.toml .
 COPY lingbot_map ./lingbot_map
 COPY demo.py .
+COPY scripts ./scripts
 
 RUN pip install --no-cache-dir -e ".[vis]"
 

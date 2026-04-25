@@ -1,0 +1,31 @@
+# LingBot-Map: bind mounts persist checkpoints and outputs on the host (same as `docker run -v ...`).
+# 1) On the host, fetch weights:   python3 scripts/download_checkpoints.py
+# 2) Run the demo, mounting your images, e.g.:
+#    docker compose run --rm -p 8080:8080 -v /path/to/frames:/data/frames:ro \
+#      lingbot-map python demo.py \
+#        --model_path /workspace/lingbot-map/checkpoints/lingbot-map-long.pt \
+#        --pretrained_path /workspace/lingbot-map/checkpoints/dinov2_vitl14_reg_official.pth \
+#        --image_folder /data/frames --viewer --no_export_glb
+# Optional: download inside a throwaway container (writes to ./checkpoints on host):
+#    docker compose run --rm lingbot-map python3 scripts/download_checkpoints.py
+#
+# Comments in this file are English; adjust paths to match your host.
+
+services:
+  lingbot-map:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: lingbot-map:latest
+    working_dir: /workspace/lingbot-map
+    gpus: all
+    ports:
+      - "8080:8080"
+    volumes:
+      # Host directories stay after the container exits (checkpoint + export persistence).
+      - ./checkpoints:/workspace/lingbot-map/checkpoints
+      - ./output:/workspace/lingbot-map/output
+    # Interactive shell: use   docker compose run --rm -it lingbot-map
+    stdin_open: true
+    tty: true
+    # Default image CMD is `bash` (from Dockerfile). Override when running a one-shot command.

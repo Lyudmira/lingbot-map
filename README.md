@@ -85,6 +85,14 @@ pip install -e ".[vis]"
 
 > 🚧 **Coming soon:** we're training an stronger model that supports longer sequences — stay tuned.
 
+**Automated download (optional):** after `pip install -e .` you can pull GCT files from HuggingFace and the DINOv2 ViT-L/14 (register) backbone from Meta into `./checkpoints/` in one step:
+
+```bash
+python3 scripts/download_checkpoints.py
+```
+
+Use `python3 scripts/download_checkpoints.py --minimal` to fetch only `lingbot-map-long.pt` plus the DINO file (aligns with `demo.py` defaults). Use `--force` to re-download. In Docker, the same script is available in the image; persist weights on the **host** by mounting `./checkpoints` (see `docker-compose.yaml` and comment block in the `Dockerfile`).
+
 # 🎬 Demo
 
 Run `demo.py` for interactive 3D visualization via a browser-based [viser](https://github.com/nerfstudio-project/viser) viewer (default `http://localhost:8080`).
